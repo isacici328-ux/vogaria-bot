@@ -1,7 +1,12 @@
-[build]
-builder = "NIXPACKS"
-
-[deploy]
-startCommand = "node bot.js"
-restartPolicyType = "ON_FAILURE"
-restartPolicyMaxRetries = 10
+{
+  "name": "vogaria-bot",
+  "version": "1.0.0",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.0.0",
+    "firebase-admin": "^11.0.0"
+  }
+}
