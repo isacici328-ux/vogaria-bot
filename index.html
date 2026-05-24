@@ -1,0 +1,903 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tribunal de Vogaria — Système Judiciaire</title>
+<link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+<!-- Firebase SDKs -->
+<script type="module">
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
+import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
+import { getFirestore, collection, doc, getDoc, getDocs, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, query, where, orderBy, serverTimestamp, Timestamp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
+
+// ═══════════════════════════════════════════════
+// CONFIG FIREBASE — Remplace avec ta config
+// ═══════════════════════════════════════════════
+const firebaseConfig = {
+  apiKey: "AIzaSyCUkcrh942ct4ZP6fpp_EcoMBojzb8h80Q",
+  authDomain: "vogaria-justice.firebaseapp.com",
+  projectId: "vogaria-justice",
+  storageBucket: "vogaria-justice.firebasestorage.app",
+  messagingSenderId: "159649949355",
+  appId: "1:159649949355:web:75cb5261ade54978c939ee"
+};
+const firebaseApp = initializeApp(firebaseConfig);
+const auth = getAuth(firebaseApp);
+const db = getFirestore(firebaseApp);
+
+let currentUser = null;
+let currentUserData = null;
+let currentTicket = null;
+let unsubListeners = [];
+
+onAuthStateChanged(auth, async (user) => {
+  if (user) {
+    currentUser = user;
+    const snap = await getDoc(doc(db, 'users', user.uid));
+    if (snap.exists()) {
+      currentUserData = { uid: user.uid, ...snap.data() };
+      showApp();
+    } else {
+      await signOut(auth);
+      showLogin('Compte non configuré. Contactez un administrateur.');
+    }
+  } else {
+    currentUser = null;
+    currentUserData = null;
+    showLogin();
+  }
+});
+
+async function login() {
+  const email = document.getElementById('login-email').value.trim();
+  const pwd = document.getElementById('login-pwd').value;
+  const err = document.getElementById('login-err');
+  err.textContent = '';
+  document.getElementById('login-btn').disabled = true;
+  document.getElementById('login-btn').textContent = 'Connexion…';
+  try {
+    await signInWithEmailAndPassword(auth, email, pwd);
+  } catch(e) {
+    err.textContent = e.code === 'auth/invalid-credential' ? 'Email ou mot de passe incorrect.' : e.message;
+    document.getElementById('login-btn').disabled = false;
+    document.getElementById('login-btn').textContent = 'Se connecter';
+  }
+}
+
+async function logout() {
+  unsubListeners.forEach(u => u());
+  unsubListeners = [];
+  await signOut(auth);
+}
+
+window.login = login;
+window.logout = logout;
+
+function showLogin(msg = '') {
+  document.getElementById('screen-login').style.display = 'flex';
+  document.getElementById('screen-app').style.display = 'none';
+  if (msg) document.getElementById('login-err').textContent = msg;
+  document.getElementById('login-btn').disabled = false;
+  document.getElementById('login-btn').textContent = 'Se connecter';
+}
+
+function showApp() {
+  document.getElementById('screen-login').style.display = 'none';
+  document.getElementById('screen-app').style.display = 'flex';
+  initApp();
+}
+
+function initApp() {
+  const role = currentUserData.role;
+  const name = currentUserData.displayName || currentUser.email;
+  document.getElementById('user-name').textContent = name;
+  document.getElementById('user-role-badge').textContent = role.toUpperCase();
+  document.getElementById('user-role-badge').className = 'role-badge role-' + role;
+  document.querySelectorAll('[data-role]').forEach(el => {
+    const roles = el.dataset.role.split(',');
+    el.style.display = roles.includes(role) || roles.includes('all') ? '' : 'none';
+  });
+  loadTickets();
+  navigateTo('tickets');
+}
+
+function navigateTo(page) {
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  const navEl = document.querySelector(`.nav-item[data-page="${page}"]`);
+  const pageEl = document.getElementById('page-' + page);
+  if (navEl) navEl.classList.add('active');
+  if (pageEl) pageEl.classList.add('active');
+  if (page === 'tickets') loadTickets();
+  if (page === 'penal') renderPenal();
+  if (page === 'deliberation') {
+    if (currentUserData.role !== 'juge') { alert('Accès refusé — Espace réservé aux juges.'); navigateTo('tickets'); return; }
+    loadDeliberation();
+  }
+  if (page === 'admin') {
+    if (currentUserData.role !== 'juge') { navigateTo('tickets'); return; }
+    loadAdmin();
+  }
+}
+window.navigateTo = navigateTo;
+
+async function loadTickets() {
+  const role = currentUserData.role;
+  const container = document.getElementById('tickets-list');
+  container.innerHTML = '<div class="loading">Chargement…</div>';
+  try {
+    let q = query(collection(db, 'tickets'), orderBy('created_at', 'desc'));
+    const snap = await getDocs(q);
+    const tickets = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    const filtered = tickets.filter(t => {
+      if (role === 'juge') return true;
+      if (role === 'procureur') return t.statut !== 'archive';
+      if (role === 'avocat') return t.avocat_defense === currentUserData.uid || t.statut === 'ouvert';
+      return false;
+    });
+    renderTicketList(filtered);
+  } catch(e) {
+    container.innerHTML = `<div class="err-box">Erreur : ${e.message}</div>`;
+  }
+}
+
+function renderTicketList(tickets) {
+  const container = document.getElementById('tickets-list');
+  const search = (document.getElementById('ticket-search')?.value || '').toLowerCase();
+  const filterStatut = document.getElementById('ticket-filter-statut')?.value || 'tous';
+  const filterType = document.getElementById('ticket-filter-type')?.value || 'tous';
+  let filtered = tickets.filter(t => {
+    const matchSearch = !search || t.ticket_id?.toLowerCase().includes(search) || t.plaignant?.nom?.toLowerCase().includes(search) || t.defendeur?.nom?.toLowerCase().includes(search) || t.faits?.toLowerCase().includes(search);
+    const matchStatut = filterStatut === 'tous' || t.statut === filterStatut;
+    const matchType = filterType === 'tous' || t.type === filterType;
+    return matchSearch && matchStatut && matchType;
+  });
+  if (filtered.length === 0) {
+    container.innerHTML = '<div class="empty-state"><span>📋</span><p>Aucun dossier trouvé</p></div>';
+    return;
+  }
+  container.innerHTML = filtered.map(t => `
+    <div class="ticket-card" onclick="openTicket('${t.id}')">
+      <div class="ticket-card-top">
+        <span class="ticket-id">${t.ticket_id}</span>
+        <span class="ticket-type-badge type-${t.type}">${typeLabel(t.type)}</span>
+        <span class="ticket-statut statut-${t.statut}">${statutLabel(t.statut)}</span>
+      </div>
+      <div class="ticket-parties">
+        <span class="partie plaignant">👤 ${t.plaignant?.nom || '—'}</span>
+        <span class="vs">c/</span>
+        <span class="partie defendeur">⚖ ${t.defendeur?.nom || '—'}</span>
+      </div>
+      <div class="ticket-faits">${(t.faits || '').slice(0, 120)}${(t.faits || '').length > 120 ? '…' : ''}</div>
+      <div class="ticket-meta">
+        <span>${formatDate(t.created_at)}</span>
+        ${t.infractions?.length ? `<span>📋 ${t.infractions.length} infraction(s)</span>` : ''}
+        ${t.juge_assigne ? `<span>⚖ Juge assigné</span>` : ''}
+      </div>
+    </div>
+  `).join('');
+}
+
+window.openTicket = async function(id) {
+  const snap = await getDoc(doc(db, 'tickets', id));
+  if (!snap.exists()) return;
+  currentTicket = { id: snap.id, ...snap.data() };
+  renderTicketDetail(currentTicket);
+  document.getElementById('ticket-detail-panel').classList.add('open');
+};
+
+window.closeTicket = function() {
+  document.getElementById('ticket-detail-panel').classList.remove('open');
+  currentTicket = null;
+};
+
+function renderTicketDetail(t) {
+  const role = currentUserData.role;
+  const panel = document.getElementById('ticket-detail-panel');
+  panel.innerHTML = `
+    <div class="detail-header">
+      <button class="btn-back" onclick="closeTicket()">← Fermer</button>
+      <div class="detail-header-info">
+        <span class="ticket-id">${t.ticket_id}</span>
+        <span class="ticket-type-badge type-${t.type}">${typeLabel(t.type)}</span>
+        <span class="ticket-statut statut-${t.statut}">${statutLabel(t.statut)}</span>
+      </div>
+      ${role === 'juge' ? `
+        <div class="detail-actions">
+          <select id="statut-select" onchange="updateStatut('${t.id}', this.value)">
+            <option value="ouvert" ${t.statut==='ouvert'?'selected':''}>Ouvert</option>
+            <option value="en_cours" ${t.statut==='en_cours'?'selected':''}>En cours</option>
+            <option value="audience" ${t.statut==='audience'?'selected':''}>Audience</option>
+            <option value="clos" ${t.statut==='clos'?'selected':''}>Clos</option>
+            <option value="archive" ${t.statut==='archive'?'selected':''}>Archivé</option>
+          </select>
+        </div>
+      ` : ''}
+    </div>
+    <div class="detail-body">
+      <div class="detail-cols">
+        <div class="detail-col">
+          <div class="detail-section">
+            <h3>Parties</h3>
+            <div class="partie-block">
+              <div class="partie-label">Plaignant</div>
+              <div class="partie-nom">${t.plaignant?.nom || '—'}</div>
+              ${t.plaignant?.discord_id ? `<div class="partie-discord">Discord: ${t.plaignant.discord_id}</div>` : ''}
+            </div>
+            <div class="partie-block">
+              <div class="partie-label">Défendeur</div>
+              <div class="partie-nom">${t.defendeur?.nom || '—'}</div>
+              ${t.defendeur?.discord_id ? `<div class="partie-discord">Discord: ${t.defendeur.discord_id}</div>` : ''}
+            </div>
+          </div>
+          <div class="detail-section">
+            <h3>Faits</h3>
+            <p class="faits-text">${t.faits || 'Aucun fait renseigné.'}</p>
+          </div>
+          ${t.preuves?.length ? `
+          <div class="detail-section">
+            <h3>Preuves</h3>
+            <ul class="preuves-list">
+              ${t.preuves.map(p => `<li>${p}</li>`).join('')}
+            </ul>
+          </div>` : ''}
+        </div>
+        <div class="detail-col">
+          <div class="detail-section">
+            <h3>Infractions retenues</h3>
+            ${t.infractions?.length ? `
+              <div class="inf-list">
+                ${t.infractions.map(inf => {
+                  const found = PENAL_DB.find(p => p.label.toLowerCase().includes(inf.toLowerCase()) || inf.toLowerCase().includes(p.label.toLowerCase()));
+                  return `<div class="inf-item">
+                    <span class="inf-label">${inf}</span>
+                    ${found ? `<span class="inf-peine">${found.min > 0 ? found.min + '–' + found.max + ' ans' : 'Amende'}</span>` : ''}
+                    ${found && found.amende !== 'Juge' ? `<span class="inf-amende">${parseInt(found.amende).toLocaleString('fr-FR')} €</span>` : ''}
+                  </div>`;
+                }).join('')}
+              </div>
+            ` : '<p class="text-muted">Aucune infraction saisie.</p>'}
+          </div>
+          ${role === 'juge' ? `
+          <div class="detail-section">
+            <h3>Assignation</h3>
+            <div class="assign-field"><label>Juge référent</label><input type="text" id="assign-juge" value="${t.juge_assigne || ''}" placeholder="Nom du juge"></div>
+            <div class="assign-field"><label>Procureur</label><input type="text" id="assign-proc" value="${t.procureur_assigne || ''}" placeholder="Nom du procureur"></div>
+            <div class="assign-field"><label>Avocat défense</label><input type="text" id="assign-avo" value="${t.avocat_defense || ''}" placeholder="Nom de l'avocat"></div>
+            <button class="btn-primary" onclick="saveAssignation('${t.id}')">Sauvegarder assignation</button>
+          </div>
+          ` : ''}
+          <div class="detail-section">
+            <h3>Notes du dossier</h3>
+            <div class="notes-list" id="notes-list-${t.id}">
+              ${(t.notes || []).map(n => `
+                <div class="note-item ${n.role}">
+                  <div class="note-meta">${n.auteur} <span class="note-date">${n.date}</span></div>
+                  <div class="note-text">${n.texte}</div>
+                </div>
+              `).join('')}
+            </div>
+            <div class="note-input">
+              <textarea id="note-textarea" placeholder="Ajouter une note…"></textarea>
+              <button class="btn-primary btn-sm" onclick="addNote('${t.id}')">Ajouter</button>
+            </div>
+          </div>
+          ${t.verdict && role !== 'juge' ? `
+          <div class="detail-section verdict-public">
+            <h3>Verdict</h3>
+            <div class="verdict-banner ${t.verdict.decision?.toLowerCase() === 'coupable' ? 'verdict-coupable' : 'verdict-relaxe'}">${t.verdict.decision || '—'}</div>
+            <p>${t.verdict.phrase || ''}</p>
+          </div>` : ''}
+          ${role === 'juge' ? `
+          <div class="detail-section deliberation-juge">
+            <h3>🔒 Délibération privée (Juge)</h3>
+            <textarea id="delib-text" placeholder="Notes de délibération confidentielles…" style="min-height:100px">${t.deliberation?.texte || ''}</textarea>
+            <div style="display:flex;gap:.5rem;margin-top:.5rem">
+              <button class="btn-primary btn-sm" onclick="saveDeliberation('${t.id}')">Sauvegarder délibération</button>
+              <button class="btn-verdict-btn" onclick="openVerdictModal('${t.id}')">📋 Rédiger le verdict</button>
+            </div>
+          </div>` : ''}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+window.updateStatut = async function(id, statut) {
+  await updateDoc(doc(db, 'tickets', id), { statut, updated_at: serverTimestamp() });
+};
+window.saveAssignation = async function(id) {
+  const juge = document.getElementById('assign-juge')?.value;
+  const proc = document.getElementById('assign-proc')?.value;
+  const avo = document.getElementById('assign-avo')?.value;
+  await updateDoc(doc(db, 'tickets', id), { juge_assigne: juge, procureur_assigne: proc, avocat_defense: avo, updated_at: serverTimestamp() });
+  showToast('Assignation sauvegardée');
+};
+window.addNote = async function(id) {
+  const txt = document.getElementById('note-textarea')?.value.trim();
+  if (!txt) return;
+  const snap = await getDoc(doc(db, 'tickets', id));
+  const notes = snap.data().notes || [];
+  notes.push({ auteur: currentUserData.displayName, role: currentUserData.role, texte: txt, date: new Date().toLocaleDateString('fr-FR') + ' ' + new Date().toLocaleTimeString('fr-FR', {hour:'2-digit',minute:'2-digit'}) });
+  await updateDoc(doc(db, 'tickets', id), { notes, updated_at: serverTimestamp() });
+  document.getElementById('note-textarea').value = '';
+  showToast('Note ajoutée');
+  openTicket(id);
+};
+window.saveDeliberation = async function(id) {
+  const texte = document.getElementById('delib-text')?.value;
+  await updateDoc(doc(db, 'tickets', id), { deliberation: { texte, auteur: currentUserData.displayName, date: new Date().toISOString() }, updated_at: serverTimestamp() });
+  showToast('Délibération sauvegardée (confidentielle)');
+};
+
+window.openVerdictModal = function(ticketId) {
+  document.getElementById('verdict-modal').style.display = 'flex';
+  document.getElementById('verdict-modal').dataset.ticketId = ticketId;
+};
+window.closeVerdictModal = function() {
+  document.getElementById('verdict-modal').style.display = 'none';
+};
+window.saveVerdict = async function() {
+  const ticketId = document.getElementById('verdict-modal').dataset.ticketId;
+  const decision = document.getElementById('verdict-decision').value;
+  const peine = document.getElementById('verdict-peine').value;
+  const amende = document.getElementById('verdict-amende').value;
+  const phrase = document.getElementById('verdict-phrase').value;
+  const verdict = { decision, peine, amende, phrase, juge: currentUserData.displayName, date: new Date().toLocaleDateString('fr-FR'), timestamp: new Date().toISOString() };
+  await updateDoc(doc(db, 'tickets', ticketId), { verdict, statut: 'clos', updated_at: serverTimestamp() });
+  closeVerdictModal();
+  showToast('Verdict enregistré');
+  openTicket(ticketId);
+  loadTickets();
+};
+
+async function loadDeliberation() {
+  const container = document.getElementById('delib-list');
+  container.innerHTML = '<div class="loading">Chargement…</div>';
+  const q = query(collection(db, 'tickets'), orderBy('created_at', 'desc'));
+  const snap = await getDocs(q);
+  const tickets = snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(t => t.deliberation);
+  if (tickets.length === 0) { container.innerHTML = '<div class="empty-state"><span>🔒</span><p>Aucune délibération en cours</p></div>'; return; }
+  container.innerHTML = tickets.map(t => `
+    <div class="delib-card" onclick="openTicket('${t.id}')">
+      <div class="delib-card-top"><span class="ticket-id">${t.ticket_id}</span><span class="ticket-statut statut-${t.statut}">${statutLabel(t.statut)}</span></div>
+      <div class="delib-parties">${t.plaignant?.nom || '—'} c/ ${t.defendeur?.nom || '—'}</div>
+      <div class="delib-excerpt">${(t.deliberation?.texte || '').slice(0, 100)}…</div>
+      <div class="delib-meta">Par ${t.deliberation?.auteur || '?'} — ${t.juge_assigne || 'Non assigné'}</div>
+    </div>
+  `).join('');
+}
+
+async function loadAdmin() {
+  const snap = await getDocs(collection(db, 'users'));
+  const users = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  document.getElementById('admin-users-list').innerHTML = users.map(u => `
+    <div class="admin-user-row">
+      <span class="admin-user-name">${u.displayName || u.email}</span>
+      <span class="role-badge role-${u.role}">${u.role?.toUpperCase()}</span>
+      <span class="admin-user-email">${u.email || ''}</span>
+      <button class="btn-sm btn-danger" onclick="deleteUser('${u.id}')">Supprimer</button>
+    </div>
+  `).join('');
+}
+
+window.createUserDoc = async function() {
+  const uid = document.getElementById('new-user-uid').value.trim();
+  const email = document.getElementById('new-user-email').value.trim();
+  const role = document.getElementById('new-user-role').value;
+  const name = document.getElementById('new-user-name').value.trim();
+  if (!uid || !email || !role || !name) { showToast('Remplissez tous les champs', 'error'); return; }
+  await setDoc(doc(db, 'users', uid), { email, role, displayName: name, createdAt: serverTimestamp() });
+  showToast('Utilisateur créé');
+  loadAdmin();
+};
+window.deleteUser = async function(uid) {
+  if (!confirm('Supprimer cet utilisateur ?')) return;
+  await deleteDoc(doc(db, 'users', uid));
+  showToast('Utilisateur supprimé');
+  loadAdmin();
+};
+
+function typeLabel(t) { return { plainte:'Plainte', audience:'Audience', appel:'Appel', instruction:'Instruction' }[t] || t; }
+function statutLabel(s) { return { ouvert:'Ouvert', en_cours:'En cours', audience:'Audience', clos:'Clos', archive:'Archivé' }[s] || s; }
+function formatDate(ts) {
+  if (!ts) return '—';
+  const d = ts.toDate ? ts.toDate() : new Date(ts);
+  return d.toLocaleDateString('fr-FR') + ' ' + d.toLocaleTimeString('fr-FR', {hour:'2-digit',minute:'2-digit'});
+}
+function showToast(msg, type = 'success') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast toast-' + type + ' show';
+  setTimeout(() => t.className = 'toast', 3000);
+}
+window.filterTickets = function() { loadTickets(); };
+
+const PENAL_DB = [
+  {cat:'crimes', label:'Assassinat', art:'Art. 221-3 CP', amende:'Juge', type:'crime', min:20, max:99},
+  {cat:'crimes', label:'Tentative d\'assassinat', art:'Art. 221-3 CP', amende:'Juge', type:'crime', min:15, max:30},
+  {cat:'crimes', label:'Meurtre', art:'Art. 221-1 CP', amende:'Juge', type:'crime', min:15, max:30},
+  {cat:'crimes', label:'Tentative de meurtre', art:'Art. 221-1 CP', amende:'Juge', type:'crime', min:10, max:20},
+  {cat:'crimes', label:'Homicide involontaire', art:'Art. 221-6 CP', amende:'Juge', type:'crime', min:3, max:5},
+  {cat:'crimes', label:'Viol', art:'Art. 222-23 CP', amende:'Juge', type:'crime', min:15, max:20},
+  {cat:'crimes', label:'Enlèvement et séquestration', art:'Art. 224-1 CP', amende:'Juge', type:'crime', min:15, max:20},
+  {cat:'crimes', label:'Actes de terrorisme', art:'Art. 421-1 CP', amende:'Juge', type:'crime', min:20, max:99},
+  {cat:'crimes', label:'Torture et actes de barbarie', art:'Art. 222-1 CP', amende:'Juge', type:'crime', min:15, max:99},
+  {cat:'crimes', label:'Association de malfaiteurs', art:'Art. 450-1 CP', amende:'Juge', type:'crime', min:5, max:10},
+  {cat:'crimes', label:'Traite des êtres humains', art:'Art. 225-4-1 CP', amende:'Juge', type:'crime', min:10, max:20},
+  {cat:'violences', label:'Violence sur agent de la force publique', art:'Art. 222-23 CP', amende:'5000', type:'délit grave', min:5, max:10},
+  {cat:'violences', label:'Violences graves (ITT > 8j)', art:'Art. 222-7 CP', amende:'3500', type:'délit', min:3, max:5},
+  {cat:'violences', label:'Violences légères (ITT ≤ 8j)', art:'Art. 222-7 CP', amende:'3000', type:'délit', min:1, max:3},
+  {cat:'violences', label:'Coups et blessures volontaires', art:'Art. 311-1 CP', amende:'2500', type:'délit', min:1, max:3},
+  {cat:'violences', label:'Violences en réunion', art:'Art. 222-23 CP', amende:'4500', type:'délit grave', min:3, max:7},
+  {cat:'violences', label:'Agression sexuelle', art:'Art. 222-27 CP', amende:'Juge', type:'crime', min:7, max:15},
+  {cat:'armes', label:'Port illégal d\'arme de guerre (cat. A)', art:'Art. 222-52 CP', amende:'5000', type:'délit grave', min:3, max:7},
+  {cat:'armes', label:'Port illégal d\'arme à feu (cat. B)', art:'Art. 222-52 CP', amende:'4000', type:'délit', min:2, max:5},
+  {cat:'armes', label:'Port d\'arme blanche sans motif légitime', art:'Art. 222-52 CP', amende:'1500', type:'délit', min:0.5, max:1},
+  {cat:'armes', label:'Détention illégale d\'arme à feu', art:'Art. 222-52 CP', amende:'2000', type:'délit', min:2, max:5},
+  {cat:'armes', label:'Trafic d\'armes', art:'Art. 222-52 CP', amende:'Juge', type:'crime', min:5, max:15},
+  {cat:'route', label:'Conduite dangereuse', art:'Art. L224-16 CR', amende:'1000', type:'délit', min:1, max:2},
+  {cat:'route', label:'Délit de fuite', art:'Art. L231-1 CR', amende:'2000', type:'délit', min:1, max:3},
+  {cat:'route', label:'Refus d\'obtempérer', art:'Art. L233-1 CR', amende:'2250', type:'délit', min:1, max:3},
+  {cat:'route', label:'Conduite sous alcool (≥ 0,8 g/L)', art:'Art. L221-1 CR', amende:'1750', type:'délit', min:1, max:2},
+  {cat:'route', label:'Conduite sous stupéfiants', art:'Art. 222-34 CP', amende:'1000', type:'délit', min:1, max:2},
+  {cat:'route', label:'Grand excès de vitesse (≥50 km/h)', art:'Art. R413-1 CR', amende:'1850', type:'contravention', min:0, max:0},
+  {cat:'route', label:'Rodéo urbain', art:'Art. L236-1 CR', amende:'2350', type:'délit', min:1, max:2},
+  {cat:'vols', label:'Vol à main armée', art:'Art. 311-1 CP', amende:'6750', type:'crime', min:15, max:20},
+  {cat:'vols', label:'Vol avec violence', art:'Art. 222-23 CP', amende:'6750', type:'délit grave', min:5, max:10},
+  {cat:'vols', label:'Vol avec effraction', art:'Art. 311-1 CP', amende:'7000', type:'délit grave', min:5, max:10},
+  {cat:'vols', label:'Vol aggravé en bande organisée', art:'Art. 311-1 CP', amende:'7750', type:'crime', min:10, max:20},
+  {cat:'vols', label:'Vol simple', art:'Art. 311-1 CP', amende:'5500', type:'délit', min:1, max:3},
+  {cat:'vols', label:'Extorsion', art:'Art. 312-1 CP', amende:'4000', type:'délit grave', min:5, max:7},
+  {cat:'vols', label:'Recel de produit d\'un crime', art:'Art. 321-1 CP', amende:'7500', type:'délit grave', min:5, max:10},
+  {cat:'stupefiants', label:'Trafic de stupéfiants', art:'Art. 222-37 CP', amende:'Juge', type:'crime', min:10, max:30},
+  {cat:'stupefiants', label:'Trafic en bande organisée', art:'Art. 222-37 CP', amende:'Juge', type:'crime', min:15, max:30},
+  {cat:'stupefiants', label:'Cession de stupéfiants', art:'Art. 222-34 CP', amende:'Juge', type:'délit grave', min:5, max:10},
+  {cat:'stupefiants', label:'Détention de stupéfiants', art:'Art. 222-34 CP', amende:'8500', type:'délit grave', min:3, max:5},
+  {cat:'stupefiants', label:'Usage de stupéfiants', art:'Art. 222-34 CP', amende:'Juge', type:'délit', min:0.5, max:1},
+  {cat:'corruption', label:'Corruption active', art:'Art. 432-11 CP', amende:'Juge', type:'délit grave', min:5, max:10},
+  {cat:'corruption', label:'Corruption passive', art:'Art. 432-11 CP', amende:'Juge', type:'délit grave', min:5, max:10},
+  {cat:'corruption', label:'Blanchiment de capitaux', art:'Art. 324-1 CP', amende:'Juge', type:'délit grave', min:5, max:10},
+  {cat:'corruption', label:'Détournement de fonds publics', art:'Art. 432-15 CP', amende:'Juge', type:'délit grave', min:5, max:10},
+  {cat:'ordre', label:'Outrage à agent de la force publique', art:'Art. 433-5 CP', amende:'4000', type:'délit', min:0.5, max:1},
+  {cat:'ordre', label:'Rébellion', art:'Art. 433-6 CP', amende:'5500', type:'délit', min:1, max:3},
+  {cat:'ordre', label:'Rébellion armée', art:'Art. 433-6 CP', amende:'6000', type:'délit grave', min:3, max:7},
+  {cat:'ordre', label:'Évasion', art:'Art. 121-2 CP', amende:'Juge', type:'délit grave', min:3, max:5},
+  {cat:'ordre', label:'Entrave à la justice', art:'Art. 433-7 CP', amende:'Juge', type:'délit grave', min:3, max:5},
+  {cat:'faux', label:'Faux témoignage', art:'Art. 441-1 CP', amende:'Juge', type:'délit grave', min:3, max:5},
+  {cat:'faux', label:'Falsification de document d\'identité', art:'Art. 441-1 CP', amende:'Juge', type:'délit grave', min:3, max:5},
+  {cat:'faux', label:'Escroquerie', art:'Art. 313-1 CP', amende:'4000', type:'délit', min:2, max:5},
+  {cat:'faux', label:'Abus de confiance', art:'Art. 314-1 CP', amende:'4000', type:'délit', min:2, max:5},
+];
+
+const CONVERSION_IRL = { normal:7, ferme:10, sursis:14, interdiction_exercer:10, interdiction_lieu:5, interdiction_contact:7 };
+const CAT_LABELS = { crimes:'🔴 Crimes', violences:'🟠 Violences', armes:'🟣 Armes', route:'🔵 Code de la route', vols:'🟢 Vols & Extorsions', stupefiants:'🌿 Stupéfiants', corruption:'🟡 Corruption', ordre:'⚪ Ordre public', faux:'🔷 Faux & Fraudes' };
+
+function renderPenal() {
+  const search = (document.getElementById('penal-search')?.value || '').toLowerCase();
+  const cats = [...new Set(PENAL_DB.map(p => p.cat))];
+  const container = document.getElementById('penal-table-body');
+  if (!container) return;
+  let html = '';
+  cats.forEach(cat => {
+    const items = PENAL_DB.filter(p => p.cat === cat && (!search || p.label.toLowerCase().includes(search) || p.art.toLowerCase().includes(search)));
+    if (items.length === 0) return;
+    html += `<tr class="penal-cat-row"><td colspan="6">${CAT_LABELS[cat]}</td></tr>`;
+    items.forEach(p => {
+      const peine = p.type === 'contravention' ? 'Amende seule' : p.max >= 99 ? 'Perpétuité' : `${p.min}–${p.max} ans`;
+      const irlNormal = p.max >= 99 ? 'Perpétuité' : p.max > 0 ? `~${Math.round((p.min+p.max)/2 * CONVERSION_IRL.normal)} j (normal)` : '—';
+      const irlFerme = p.max >= 99 ? 'Perpétuité' : p.max > 0 ? `~${Math.round((p.min+p.max)/2 * CONVERSION_IRL.ferme)} j (ferme)` : '—';
+      const amendeCell = p.amende === 'Juge' ? '<span style="color:var(--gold2)">Juge</span>' : `${parseInt(p.amende).toLocaleString('fr-FR')} €`;
+      html += `<tr class="penal-row type-${p.type.replace(' ','-')}"><td>${p.label}</td><td class="mono">${p.art}</td><td class="type-cell"><span class="type-badge type-${p.type.replace(' ','-')}">${p.type}</span></td><td>${peine}</td><td class="mono">${irlNormal}<br><small>${irlFerme}</small></td><td>${amendeCell}</td></tr>`;
+    });
+  });
+  container.innerHTML = html;
+}
+window.renderPenal = renderPenal;
+window.filterPenal = renderPenal;
+
+window.calcIRL = function() {
+  const annees = parseFloat(document.getElementById('calc-annees').value) || 0;
+  const type = document.getElementById('calc-type').value;
+  const jours = annees * CONVERSION_IRL[type];
+  const el = document.getElementById('calc-result');
+  el.textContent = `${annees} an(s) → ${Math.round(jours)} jours IRL (${CONVERSION_IRL[type]} j/an)`;
+  el.style.display = 'block';
+};
+
+window.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('login-pwd')?.addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
+});
+</script>
+
+<style>
+:root {
+  --bg:#0b0b0c;--bg2:#101012;--bg3:#161618;--bg4:#1c1c1f;
+  --border:rgba(255,255,255,0.06);--border2:rgba(255,255,255,0.11);
+  --gold:#b5890f;--gold2:#d4a82a;--gold3:#f0c84a;
+  --red:#c0392b;--red2:#e74c3c;--green:#1a6e42;--green2:#2ecc71;--blue:#2980b9;
+  --text:#e4e0d8;--text2:#8a877f;--text3:#4a4845;
+  --serif:'EB Garamond',Georgia,serif;--mono:'DM Mono',monospace;--sidebar-w:240px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden}
+body{background:var(--bg);color:var(--text);font-family:var(--serif);font-size:15px;line-height:1.6}
+#screen-login{display:flex;align-items:center;justify-content:center;height:100vh;background:radial-gradient(ellipse at 50% 30%,rgba(181,137,15,.08) 0%,transparent 70%)}
+.login-card{background:var(--bg2);border:1px solid var(--border2);border-radius:10px;padding:2.5rem 2rem;width:360px;text-align:center}
+.login-logo{font-size:2.5rem;margin-bottom:.5rem}
+.login-title{font-size:1.6rem;font-weight:500;color:var(--text);margin-bottom:.25rem}
+.login-title em{color:var(--gold2);font-style:normal}
+.login-sub{font-size:.7rem;color:var(--text3);letter-spacing:.15em;text-transform:uppercase;font-family:var(--mono);margin-bottom:1.75rem}
+.login-card input{width:100%;background:var(--bg3);border:1px solid var(--border2);border-radius:5px;color:var(--text);font-family:var(--serif);font-size:.95rem;padding:.65rem .85rem;outline:none;transition:border-color .12s;margin-bottom:.75rem}
+.login-card input:focus{border-color:var(--gold)}
+.login-err{color:var(--red2);font-size:.82rem;margin-bottom:.75rem;min-height:1.2rem}
+.btn-login{width:100%;background:var(--gold);color:#0b0b0c;border:none;border-radius:5px;padding:.75rem;font-family:var(--mono);font-size:.82rem;letter-spacing:.1em;text-transform:uppercase;cursor:pointer;font-weight:500;transition:background .13s}
+.btn-login:hover{background:var(--gold2)}
+.btn-login:disabled{opacity:.5;cursor:not-allowed}
+#screen-app{display:none;height:100vh;flex-direction:row}
+.sidebar{width:var(--sidebar-w);flex-shrink:0;background:var(--bg2);border-right:1px solid var(--border2);display:flex;flex-direction:column;height:100vh;overflow:hidden}
+.sidebar-logo{padding:1.4rem 1.1rem 1rem;border-bottom:1px solid var(--border2);text-align:center}
+.sidebar-logo .scales{font-size:1.8rem;display:block;margin-bottom:.3rem}
+.sidebar-logo h1{font-size:1.2rem;font-weight:500}
+.sidebar-logo h1 em{color:var(--gold2);font-style:normal}
+.sidebar-logo p{font-size:.6rem;color:var(--text3);letter-spacing:.12em;text-transform:uppercase;font-family:var(--mono);margin-top:.2rem}
+.sidebar-nav{padding:.6rem .6rem;flex:1;overflow-y:auto}
+.nav-section{font-size:.58rem;letter-spacing:.2em;text-transform:uppercase;color:var(--gold);font-family:var(--mono);padding:.6rem .5rem .3rem}
+.nav-item{display:flex;align-items:center;gap:9px;padding:.45rem .65rem;border-radius:5px;cursor:pointer;font-size:.85rem;color:var(--text2);transition:all .12s;border:none;background:none;width:100%;text-align:left;margin-bottom:1px}
+.nav-item:hover{background:var(--bg4);color:var(--text)}
+.nav-item.active{background:rgba(181,137,15,.12);color:var(--gold2);border:1px solid rgba(181,137,15,.2)}
+.nav-item .nav-icon{font-size:1rem;flex-shrink:0}
+.sidebar-footer{padding:.85rem 1rem;border-top:1px solid var(--border2)}
+.user-info{display:flex;align-items:center;gap:.6rem;margin-bottom:.5rem}
+.user-avatar{width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,var(--gold),var(--gold2));display:flex;align-items:center;justify-content:center;font-size:.9rem;color:#0b0b0c;flex-shrink:0}
+.user-name{font-size:.82rem;font-weight:500}
+.role-badge{font-family:var(--mono);font-size:.6rem;padding:2px 7px;border-radius:3px;letter-spacing:.1em;display:inline-block}
+.role-juge{background:rgba(181,137,15,.2);color:var(--gold2);border:1px solid rgba(181,137,15,.3)}
+.role-procureur{background:rgba(192,57,43,.2);color:var(--red2);border:1px solid rgba(192,57,43,.3)}
+.role-avocat{background:rgba(41,128,185,.2);color:#5dade2;border:1px solid rgba(41,128,185,.3)}
+.btn-logout{background:none;border:1px solid var(--border2);color:var(--text3);border-radius:4px;padding:.3rem .7rem;font-family:var(--mono);font-size:.68rem;cursor:pointer;width:100%;transition:all .12s}
+.btn-logout:hover{border-color:var(--red);color:var(--red2)}
+.main-area{flex:1;overflow:hidden;display:flex;flex-direction:column}
+.pages{flex:1;overflow:hidden;position:relative}
+.page{display:none;height:100%;overflow-y:auto;padding:1.5rem}
+.page.active{display:block}
+.tickets-toolbar{display:flex;gap:.6rem;margin-bottom:1rem;align-items:center;flex-wrap:wrap}
+.tickets-toolbar input,.tickets-toolbar select{background:var(--bg2);border:1px solid var(--border2);color:var(--text);border-radius:5px;padding:.45rem .8rem;font-family:var(--serif);font-size:.88rem;outline:none;transition:border-color .12s}
+.tickets-toolbar input:focus,.tickets-toolbar select:focus{border-color:var(--gold)}
+.tickets-toolbar input{flex:1;min-width:180px}
+#tickets-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:.75rem}
+.ticket-card{background:var(--bg2);border:1px solid var(--border);border-radius:7px;padding:.9rem 1rem;cursor:pointer;transition:all .13s}
+.ticket-card:hover{border-color:var(--border2);background:var(--bg3);transform:translateY(-1px)}
+.ticket-card-top{display:flex;align-items:center;gap:.5rem;margin-bottom:.5rem;flex-wrap:wrap}
+.ticket-id{font-family:var(--mono);font-size:.72rem;color:var(--gold2)}
+.ticket-type-badge{font-family:var(--mono);font-size:.6rem;padding:2px 7px;border-radius:3px;text-transform:uppercase;letter-spacing:.08em}
+.type-plainte{background:rgba(41,128,185,.15);color:#5dade2;border:1px solid rgba(41,128,185,.25)}
+.type-audience{background:rgba(181,137,15,.15);color:var(--gold2);border:1px solid rgba(181,137,15,.25)}
+.type-appel{background:rgba(192,57,43,.15);color:var(--red2);border:1px solid rgba(192,57,43,.25)}
+.type-instruction{background:rgba(155,89,182,.15);color:#af7ac5;border:1px solid rgba(155,89,182,.25)}
+.ticket-statut{font-family:var(--mono);font-size:.6rem;padding:2px 7px;border-radius:3px;margin-left:auto}
+.statut-ouvert{background:rgba(46,204,113,.1);color:var(--green2);border:1px solid rgba(46,204,113,.2)}
+.statut-en_cours{background:rgba(181,137,15,.1);color:var(--gold2);border:1px solid rgba(181,137,15,.2)}
+.statut-audience{background:rgba(231,76,60,.1);color:var(--red2);border:1px solid rgba(231,76,60,.2)}
+.statut-clos{background:rgba(127,140,141,.1);color:#aab7b8;border:1px solid rgba(127,140,141,.2)}
+.statut-archive{background:rgba(52,73,94,.2);color:#7f8c8d;border:1px solid rgba(52,73,94,.3)}
+.ticket-parties{display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem;font-size:.88rem}
+.partie{font-weight:500}
+.vs{color:var(--text3);font-family:var(--mono);font-size:.75rem}
+.ticket-faits{font-size:.82rem;color:var(--text2);margin-bottom:.5rem;font-style:italic;line-height:1.5}
+.ticket-meta{display:flex;gap:.85rem;font-size:.7rem;color:var(--text3);font-family:var(--mono);flex-wrap:wrap}
+#ticket-detail-panel{position:fixed;top:0;right:-100%;width:min(700px,100vw);height:100vh;background:var(--bg);border-left:1px solid var(--border2);z-index:200;transition:right .3s cubic-bezier(.4,0,.2,1);display:flex;flex-direction:column;overflow:hidden}
+#ticket-detail-panel.open{right:0}
+.detail-header{padding:.85rem 1.2rem;border-bottom:1px solid var(--border2);background:var(--bg2);display:flex;align-items:center;gap:.75rem;flex-shrink:0;flex-wrap:wrap}
+.btn-back{background:none;border:1px solid var(--border2);color:var(--text2);border-radius:4px;padding:.3rem .65rem;font-family:var(--mono);font-size:.72rem;cursor:pointer;transition:all .12s}
+.btn-back:hover{color:var(--text);border-color:var(--gold)}
+.detail-header-info{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap}
+.detail-actions{margin-left:auto}
+.detail-actions select{background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:4px;padding:.3rem .6rem;font-size:.8rem;cursor:pointer}
+.detail-body{flex:1;overflow-y:auto;padding:1.2rem}
+.detail-cols{display:grid;grid-template-columns:1fr 1fr;gap:1rem}
+@media(max-width:600px){.detail-cols{grid-template-columns:1fr}}
+.detail-section{background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:.9rem 1rem;margin-bottom:.85rem}
+.detail-section h3{font-size:.62rem;letter-spacing:.18em;text-transform:uppercase;color:var(--gold);font-family:var(--mono);font-weight:400;margin-bottom:.7rem;padding-bottom:.35rem;border-bottom:1px solid var(--border)}
+.partie-block{margin-bottom:.65rem}
+.partie-label{font-size:.62rem;color:var(--text3);font-family:var(--mono);text-transform:uppercase;letter-spacing:.1em}
+.partie-nom{font-size:1rem;font-weight:500}
+.partie-discord{font-size:.72rem;color:var(--text3);font-family:var(--mono)}
+.faits-text{font-size:.9rem;line-height:1.7;color:var(--text2)}
+.preuves-list{list-style:none}
+.preuves-list li{font-size:.85rem;padding:.25rem 0;border-bottom:1px solid var(--border)}
+.preuves-list li::before{content:'▸ ';color:var(--gold)}
+.inf-list{display:flex;flex-direction:column;gap:.4rem}
+.inf-item{display:flex;align-items:center;gap:.5rem;font-size:.85rem;padding:.3rem .5rem;background:var(--bg3);border-radius:4px;border:1px solid var(--border);flex-wrap:wrap}
+.inf-label{flex:1}
+.inf-peine{font-family:var(--mono);font-size:.7rem;color:var(--red2);background:rgba(192,57,43,.1);padding:1px 6px;border-radius:3px}
+.inf-amende{font-family:var(--mono);font-size:.7rem;color:var(--green2)}
+.assign-field{margin-bottom:.6rem}
+.assign-field label{font-size:.75rem;color:var(--text2);display:block;margin-bottom:.25rem;font-family:var(--mono)}
+.assign-field input{width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:4px;padding:.45rem .7rem;font-family:var(--serif);font-size:.9rem;outline:none;transition:border-color .12s}
+.assign-field input:focus{border-color:var(--gold)}
+.notes-list{margin-bottom:.75rem;display:flex;flex-direction:column;gap:.5rem}
+.note-item{padding:.5rem .7rem;border-radius:5px;font-size:.83rem}
+.note-item.juge{background:rgba(181,137,15,.08);border-left:3px solid var(--gold)}
+.note-item.procureur{background:rgba(192,57,43,.08);border-left:3px solid var(--red)}
+.note-item.avocat{background:rgba(41,128,185,.08);border-left:3px solid var(--blue)}
+.note-meta{font-size:.68rem;color:var(--text3);font-family:var(--mono);margin-bottom:.2rem}
+.note-date{opacity:.7}
+.note-input{display:flex;gap:.5rem;align-items:flex-end}
+.note-input textarea{flex:1;background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:4px;padding:.45rem .7rem;font-family:var(--serif);font-size:.88rem;resize:none;min-height:60px;outline:none;transition:border-color .12s}
+.note-input textarea:focus{border-color:var(--gold)}
+.deliberation-juge{border-left:3px solid var(--gold) !important}
+.deliberation-juge textarea{width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:4px;padding:.55rem .8rem;font-family:var(--serif);font-size:.9rem;resize:vertical;outline:none;transition:border-color .12s}
+.deliberation-juge textarea:focus{border-color:var(--gold)}
+.verdict-public{border-left:3px solid var(--green) !important}
+.verdict-banner{text-align:center;padding:.6rem 1rem;font-size:1.3rem;font-weight:600;letter-spacing:.1em;border-radius:4px;margin-bottom:.6rem}
+.verdict-coupable{background:rgba(192,57,43,.15);color:var(--red2);border:1px solid rgba(192,57,43,.3)}
+.verdict-relaxe{background:rgba(26,110,66,.15);color:var(--green2);border:1px solid rgba(26,110,66,.3)}
+.btn-primary{background:var(--gold);color:#0b0b0c;border:none;border-radius:4px;padding:.5rem 1rem;font-family:var(--mono);font-size:.75rem;letter-spacing:.08em;cursor:pointer;font-weight:500;transition:background .12s}
+.btn-primary:hover{background:var(--gold2)}
+.btn-sm{padding:.35rem .75rem !important;font-size:.72rem !important}
+.btn-danger{background:rgba(192,57,43,.15);border:1px solid rgba(192,57,43,.3);color:var(--red2);border-radius:4px;padding:.3rem .7rem;font-size:.72rem;cursor:pointer;font-family:var(--mono)}
+.btn-danger:hover{background:rgba(192,57,43,.3)}
+.btn-verdict-btn{background:rgba(181,137,15,.12);border:1px solid rgba(181,137,15,.3);color:var(--gold2);border-radius:4px;padding:.35rem .85rem;font-family:var(--mono);font-size:.72rem;cursor:pointer;transition:all .12s}
+.btn-verdict-btn:hover{background:rgba(181,137,15,.22)}
+#verdict-modal{display:none;position:fixed;inset:0;z-index:500;background:rgba(0,0,0,.75);align-items:center;justify-content:center}
+.verdict-modal-card{background:var(--bg2);border:1px solid var(--border2);border-radius:8px;padding:1.75rem;width:min(560px,95vw);max-height:90vh;overflow-y:auto}
+.verdict-modal-card h2{font-size:1rem;font-weight:500;color:var(--gold2);margin-bottom:1.25rem;padding-bottom:.6rem;border-bottom:1px solid var(--border2);font-family:var(--mono);letter-spacing:.1em;text-transform:uppercase}
+.verdict-field{margin-bottom:.85rem}
+.verdict-field label{font-size:.75rem;color:var(--text2);display:block;margin-bottom:.3rem;font-family:var(--mono)}
+.verdict-field select,.verdict-field input,.verdict-field textarea{width:100%;background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:4px;padding:.5rem .8rem;font-family:var(--serif);font-size:.95rem;outline:none;transition:border-color .12s}
+.verdict-field select:focus,.verdict-field input:focus,.verdict-field textarea:focus{border-color:var(--gold)}
+.verdict-field textarea{min-height:100px;resize:vertical}
+.verdict-modal-actions{display:flex;gap:.6rem;margin-top:1rem;justify-content:flex-end}
+.btn-cancel{background:none;border:1px solid var(--border2);color:var(--text2);border-radius:4px;padding:.5rem 1rem;font-family:var(--mono);font-size:.75rem;cursor:pointer}
+.btn-cancel:hover{border-color:var(--text2);color:var(--text)}
+.penal-toolbar{display:flex;gap:.6rem;margin-bottom:1rem;align-items:center}
+.penal-toolbar input{flex:1;background:var(--bg2);border:1px solid var(--border2);color:var(--text);border-radius:5px;padding:.5rem .85rem;font-family:var(--serif);font-size:.9rem;outline:none}
+.penal-toolbar input:focus{border-color:var(--gold)}
+.penal-table-wrap{background:var(--bg2);border:1px solid var(--border);border-radius:7px;overflow:hidden;margin-bottom:1.5rem}
+.penal-table{width:100%;border-collapse:collapse}
+.penal-table th{padding:.55rem .9rem;font-family:var(--mono);font-size:.62rem;letter-spacing:.15em;text-transform:uppercase;color:var(--text3);text-align:left;border-bottom:1px solid var(--border2)}
+.penal-cat-row td{background:var(--bg3);padding:.45rem .9rem;font-size:.72rem;font-family:var(--mono);letter-spacing:.1em;color:var(--gold);border-top:1px solid var(--border2);border-bottom:1px solid var(--border)}
+.penal-row td{padding:.5rem .9rem;border-bottom:1px solid var(--border);font-size:.87rem}
+.penal-row:hover td{background:rgba(255,255,255,.02)}
+.mono{font-family:var(--mono);font-size:.78rem}
+.type-badge{font-family:var(--mono);font-size:.58rem;padding:2px 6px;border-radius:3px;white-space:nowrap}
+.type-crime{background:rgba(192,57,43,.15);color:var(--red2);border:1px solid rgba(192,57,43,.25)}
+.type-délit{background:rgba(231,76,60,.08);color:#e67e22;border:1px solid rgba(231,76,60,.15)}
+.type-délit-grave{background:rgba(192,57,43,.08);color:var(--red2);border:1px solid rgba(192,57,43,.15)}
+.type-contravention{background:rgba(41,128,185,.1);color:#5dade2;border:1px solid rgba(41,128,185,.2)}
+.calc-card{background:var(--bg2);border:1px solid var(--border);border-radius:7px;padding:1.25rem 1.5rem;max-width:520px}
+.calc-card h3{font-size:.72rem;font-family:var(--mono);letter-spacing:.15em;text-transform:uppercase;color:var(--gold);margin-bottom:1rem}
+.calc-row{display:flex;gap:.75rem;align-items:center;margin-bottom:.75rem;flex-wrap:wrap}
+.calc-row label{font-size:.75rem;color:var(--text2);min-width:80px;font-family:var(--mono)}
+.calc-row input,.calc-row select{background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:4px;padding:.4rem .7rem;font-size:.9rem;outline:none;transition:border-color .12s;flex:1;min-width:120px}
+.calc-row input:focus,.calc-row select:focus{border-color:var(--gold)}
+#calc-result{font-size:1.1rem;font-weight:500;color:var(--gold2);font-family:var(--mono);padding:.7rem 1rem;background:rgba(181,137,15,.08);border:1px solid rgba(181,137,15,.2);border-radius:5px;margin-top:.5rem;display:none}
+.conversion-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:.6rem;margin-bottom:1.5rem}
+.conv-card{background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:.75rem 1rem}
+.conv-card .conv-type{font-size:.62rem;font-family:var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--text3);margin-bottom:.25rem}
+.conv-card .conv-val{font-size:1rem;font-weight:500;color:var(--gold2)}
+.delib-card{background:var(--bg2);border:1px solid var(--border);border-left:3px solid var(--gold);border-radius:6px;padding:.9rem 1rem;margin-bottom:.75rem;cursor:pointer;transition:all .12s}
+.delib-card:hover{border-color:var(--gold2)}
+.delib-card-top{display:flex;gap:.5rem;align-items:center;margin-bottom:.4rem}
+.delib-parties{font-size:.88rem;font-weight:500;margin-bottom:.3rem}
+.delib-excerpt{font-size:.82rem;color:var(--text2);font-style:italic;margin-bottom:.35rem}
+.delib-meta{font-size:.7rem;color:var(--text3);font-family:var(--mono)}
+.admin-section{background:var(--bg2);border:1px solid var(--border);border-radius:7px;padding:1.1rem 1.25rem;margin-bottom:1.25rem}
+.admin-section h3{font-size:.65rem;letter-spacing:.15em;text-transform:uppercase;color:var(--gold);font-family:var(--mono);margin-bottom:1rem;padding-bottom:.4rem;border-bottom:1px solid var(--border)}
+.admin-user-row{display:flex;align-items:center;gap:.75rem;padding:.6rem 0;border-bottom:1px solid var(--border);flex-wrap:wrap}
+.admin-user-row:last-child{border-bottom:none}
+.admin-user-name{font-weight:500;flex:1;min-width:120px}
+.admin-user-email{font-size:.78rem;color:var(--text3);font-family:var(--mono)}
+.admin-form{display:grid;gap:.7rem}
+.admin-form-row{display:flex;gap:.6rem;flex-wrap:wrap}
+.admin-form input,.admin-form select{background:var(--bg3);border:1px solid var(--border2);color:var(--text);border-radius:4px;padding:.5rem .8rem;font-family:var(--serif);font-size:.9rem;outline:none;flex:1;min-width:160px;transition:border-color .12s}
+.admin-form input:focus,.admin-form select:focus{border-color:var(--gold)}
+.webhook-card{background:var(--bg2);border:1px solid var(--border);border-radius:7px;padding:1.25rem 1.5rem;max-width:700px}
+.webhook-card h3{font-size:.72rem;font-family:var(--mono);letter-spacing:.15em;text-transform:uppercase;color:var(--gold);margin-bottom:.75rem}
+.code-block{background:var(--bg);border:1px solid var(--border2);border-radius:5px;padding:.85rem 1rem;font-family:var(--mono);font-size:.78rem;color:#a8d8a8;overflow-x:auto;white-space:pre;margin-bottom:1rem}
+.webhook-url{background:var(--bg3);border:1px solid rgba(181,137,15,.3);border-radius:4px;padding:.5rem .85rem;font-family:var(--mono);font-size:.82rem;color:var(--gold2);margin-bottom:.75rem;word-break:break-all}
+.loading{text-align:center;padding:2rem;color:var(--text3);font-family:var(--mono);font-size:.85rem}
+.empty-state{text-align:center;padding:3rem 1rem;color:var(--text3)}
+.empty-state span{font-size:2.5rem;display:block;margin-bottom:.75rem;opacity:.4}
+.empty-state p{font-size:.9rem;font-style:italic}
+.err-box{background:rgba(192,57,43,.1);border:1px solid rgba(192,57,43,.3);color:var(--red2);padding:.85rem 1rem;border-radius:5px;font-size:.9rem}
+.text-muted{color:var(--text3);font-size:.85rem;font-style:italic}
+.toast{position:fixed;bottom:1.5rem;left:50%;transform:translateX(-50%) translateY(80px);background:var(--bg4);border:1px solid var(--border2);color:var(--text);padding:.65rem 1.25rem;border-radius:6px;font-family:var(--mono);font-size:.8rem;z-index:999;transition:transform .25s;opacity:0}
+.toast.show{transform:translateX(-50%) translateY(0);opacity:1}
+.toast-success{border-color:rgba(46,204,113,.3)}
+.toast-error{border-color:rgba(192,57,43,.3);color:var(--red2)}
+.toast-info{border-color:rgba(41,128,185,.3);color:#5dade2}
+.page-header{margin-bottom:1.25rem}
+.page-header h2{font-size:1.4rem;font-weight:500;margin-bottom:.15rem}
+.page-header p{font-size:.85rem;color:var(--text2)}
+</style>
+</head>
+<body>
+
+<div id="screen-login">
+  <div class="login-card">
+    <div class="login-logo">⚖</div>
+    <h1 class="login-title">Tribunal de <em>Vogaria</em></h1>
+    <p class="login-sub">Système Judiciaire · Accès Sécurisé</p>
+    <input type="email" id="login-email" placeholder="Adresse email">
+    <input type="password" id="login-pwd" placeholder="Mot de passe">
+    <div class="login-err" id="login-err"></div>
+    <button class="btn-login" id="login-btn" onclick="login()">Se connecter</button>
+  </div>
+</div>
+
+<div id="screen-app">
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      <span class="scales">⚖</span>
+      <h1>Tribunal de <em>Vogaria</em></h1>
+      <p>République Française</p>
+    </div>
+    <nav class="sidebar-nav">
+      <div class="nav-section" data-role="all">Dossiers</div>
+      <button class="nav-item active" data-page="tickets" data-role="all" onclick="navigateTo('tickets')"><span class="nav-icon">📋</span> Dossiers judiciaires</button>
+      <div class="nav-section" data-role="juge,procureur,avocat">Juridiction</div>
+      <button class="nav-item" data-page="penal" data-role="all" onclick="navigateTo('penal')"><span class="nav-icon">📖</span> Code pénal</button>
+      <button class="nav-item" data-page="deliberation" data-role="juge" onclick="navigateTo('deliberation')"><span class="nav-icon">🔒</span> Délibérations</button>
+      <div class="nav-section" data-role="juge">Administration</div>
+      <button class="nav-item" data-page="admin" data-role="juge" onclick="navigateTo('admin')"><span class="nav-icon">⚙</span> Gestion comptes</button>
+      <button class="nav-item" data-page="webhook" data-role="juge" onclick="navigateTo('webhook')"><span class="nav-icon">🔗</span> Webhook Discord</button>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="user-info">
+        <div class="user-avatar">⚖</div>
+        <div>
+          <div class="user-name" id="user-name">—</div>
+          <span class="role-badge" id="user-role-badge">—</span>
+        </div>
+      </div>
+      <button class="btn-logout" onclick="logout()">Se déconnecter</button>
+    </div>
+  </aside>
+
+  <div class="main-area">
+    <div class="pages">
+
+      <div class="page active" id="page-tickets">
+        <div class="page-header"><h2>Dossiers judiciaires</h2><p>Ensemble des affaires en cours et archivées</p></div>
+        <div class="tickets-toolbar">
+          <input type="text" id="ticket-search" placeholder="Rechercher un dossier, une partie…" oninput="filterTickets()">
+          <select id="ticket-filter-statut" onchange="filterTickets()">
+            <option value="tous">Tous statuts</option><option value="ouvert">Ouvert</option><option value="en_cours">En cours</option><option value="audience">Audience</option><option value="clos">Clos</option><option value="archive">Archivé</option>
+          </select>
+          <select id="ticket-filter-type" onchange="filterTickets()">
+            <option value="tous">Tous types</option><option value="plainte">Plainte</option><option value="audience">Audience</option><option value="appel">Appel</option><option value="instruction">Instruction</option>
+          </select>
+        </div>
+        <div id="tickets-list"><div class="loading">Chargement des dossiers…</div></div>
+      </div>
+
+      <div class="page" id="page-penal">
+        <div class="page-header"><h2>Code pénal — Référentiel</h2><p>Base de données des infractions, peines et amendes avec conversion IRL</p></div>
+        <h3 style="font-size:.72rem;font-family:var(--mono);letter-spacing:.15em;text-transform:uppercase;color:var(--gold);margin-bottom:.75rem">Grille de conversion IRL</h3>
+        <div class="conversion-grid">
+          <div class="conv-card"><div class="conv-type">Prison normale</div><div class="conv-val">1 an = 7 jours IRL</div></div>
+          <div class="conv-card"><div class="conv-type">Prison ferme</div><div class="conv-val">1 an = 10 jours IRL</div></div>
+          <div class="conv-card"><div class="conv-type">Avec sursis</div><div class="conv-val">1 an = 14 jours IRL</div></div>
+          <div class="conv-card"><div class="conv-type">Interdiction exercer</div><div class="conv-val">1 an = 10 jours IRL</div></div>
+          <div class="conv-card"><div class="conv-type">Interdiction de lieu</div><div class="conv-val">1 an = 5 jours IRL</div></div>
+          <div class="conv-card"><div class="conv-type">Interdiction de contact</div><div class="conv-val">1 an = 7 jours IRL</div></div>
+        </div>
+        <div class="calc-card" style="margin-bottom:1.5rem">
+          <h3>Calculateur de conversion IRL</h3>
+          <div class="calc-row"><label>Durée</label><input type="number" id="calc-annees" placeholder="ex: 5" min="0" step="0.5"><span style="color:var(--text3);font-family:var(--mono);font-size:.85rem">an(s)</span></div>
+          <div class="calc-row"><label>Type de peine</label>
+            <select id="calc-type">
+              <option value="normal">Prison normale (7j/an)</option>
+              <option value="ferme">Prison ferme (10j/an)</option>
+              <option value="sursis">Avec sursis (14j/an)</option>
+              <option value="interdiction_exercer">Interdit. exercer (10j/an)</option>
+              <option value="interdiction_lieu">Interdit. lieu (5j/an)</option>
+              <option value="interdiction_contact">Interdit. contact (7j/an)</option>
+            </select>
+          </div>
+          <button class="btn-primary" onclick="calcIRL()">Calculer</button>
+          <div id="calc-result"></div>
+        </div>
+        <div class="penal-toolbar"><input type="text" id="penal-search" placeholder="Rechercher une infraction, un article…" oninput="filterPenal()"></div>
+        <div class="penal-table-wrap">
+          <table class="penal-table">
+            <thead><tr><th>Infraction</th><th>Article</th><th>Type</th><th>Peine</th><th>Durée IRL (moy.)</th><th>Amende</th></tr></thead>
+            <tbody id="penal-table-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="page" id="page-deliberation">
+        <div class="page-header"><h2>🔒 Délibérations confidentielles</h2><p>Espace strictement privé réservé aux juges</p></div>
+        <div id="delib-list"><div class="loading">Chargement…</div></div>
+      </div>
+
+      <div class="page" id="page-admin">
+        <div class="page-header"><h2>Gestion des comptes</h2><p>Administration des utilisateurs et des rôles</p></div>
+        <div class="admin-section">
+          <h3>Utilisateurs actifs</h3>
+          <div id="admin-users-list"><div class="loading">Chargement…</div></div>
+        </div>
+        <div class="admin-section">
+          <h3>Créer un utilisateur</h3>
+          <p style="font-size:.82rem;color:var(--text2);margin-bottom:.85rem">1. Créez le compte dans <strong>Firebase Console → Authentication → Add user</strong><br>2. Copiez l'UID généré et renseignez-le ci-dessous pour lui attribuer un rôle.</p>
+          <div class="admin-form">
+            <div class="admin-form-row">
+              <input type="text" id="new-user-uid" placeholder="UID Firebase (depuis la console)">
+              <input type="text" id="new-user-name" placeholder="Nom affiché (ex: Juge Darnell)">
+            </div>
+            <div class="admin-form-row">
+              <input type="email" id="new-user-email" placeholder="Email">
+              <select id="new-user-role"><option value="juge">⚖ Juge</option><option value="procureur">🔴 Procureur</option><option value="avocat">🔵 Avocat</option></select>
+            </div>
+            <button class="btn-primary" onclick="createUserDoc()">Créer le profil</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="page" id="page-webhook">
+        <div class="page-header"><h2>Intégration Discord — Webhook</h2><p>Configuration pour importer automatiquement les tickets Discord</p></div>
+        <div class="webhook-card" style="margin-bottom:1rem">
+          <h3>URL du Webhook</h3>
+          <div class="webhook-url">https://[votre-site].netlify.app/.netlify/functions/webhook</div>
+          <p style="font-size:.82rem;color:var(--text2);margin-bottom:.75rem">Configurez votre bot Discord pour envoyer une requête POST à cette URL à chaque ouverture de ticket.</p>
+          <h3>Headers requis</h3>
+          <div class="code-block">Content-Type: application/json
+X-Webhook-Secret: [votre-secret-dans-netlify-env]</div>
+          <h3>Format JSON attendu</h3>
+          <div class="code-block">{
+  "ticket_id": "TVG-2026-001",
+  "type": "plainte",
+  "plaignant": { "nom": "Jean Dupont", "discord_id": "123456789" },
+  "defendeur": { "nom": "Marc Martin", "discord_id": "987654321" },
+  "faits": "Description des faits…",
+  "infractions": ["Vol à main armée", "Délit de fuite"],
+  "preuves": ["Capture MDT", "Témoignage"],
+  "channel_id": "channel_discord_id",
+  "guild_id": "guild_discord_id",
+  "created_at": "2026-05-24T10:00:00Z"
+}</div>
+        </div>
+        <div class="webhook-card">
+          <h3>Variables d'environnement Netlify</h3>
+          <p style="font-size:.82rem;color:var(--text2);margin-bottom:.75rem">Dans <strong>Netlify → Site configuration → Environment variables</strong>, ajoutez :</p>
+          <div class="code-block">WEBHOOK_SECRET          = [secret-de-votre-choix]
+FIREBASE_PROJECT_ID     = [votre-project-id]
+FIREBASE_CLIENT_EMAIL   = [email-compte-service]
+FIREBASE_PRIVATE_KEY    = [clé-privée-compte-service]</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<div id="ticket-detail-panel"></div>
+
+<div id="verdict-modal">
+  <div class="verdict-modal-card">
+    <h2>📋 Rédiger le verdict</h2>
+    <div class="verdict-field"><label>Décision</label>
+      <select id="verdict-decision">
+        <option value="COUPABLE">COUPABLE</option>
+        <option value="RELAXE">RELAXÉ(E)</option>
+        <option value="PARTIELLEMENT COUPABLE">PARTIELLEMENT COUPABLE</option>
+      </select>
+    </div>
+    <div class="verdict-field"><label>Peine prononcée</label><input type="text" id="verdict-peine" placeholder="Ex: 15 ans de réclusion criminelle (150 jours IRL)"></div>
+    <div class="verdict-field"><label>Amende</label><input type="text" id="verdict-amende" placeholder="Ex: 12 500 €"></div>
+    <div class="verdict-field"><label>Phrase officielle du verdict</label><textarea id="verdict-phrase" placeholder="Au nom du peuple français, le Tribunal de Vogaria déclare…"></textarea></div>
+    <div class="verdict-modal-actions">
+      <button class="btn-cancel" onclick="closeVerdictModal()">Annuler</button>
+      <button class="btn-primary" onclick="saveVerdict()">✔ Enregistrer le verdict</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+</body>
+</html>
