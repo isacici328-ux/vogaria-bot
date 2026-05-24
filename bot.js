@@ -367,5 +367,12 @@ client.on('channelDelete', async (channel) => {
   }
 });
 
+// Serveur HTTP pour UptimeRobot
+const http = require('http');
+http.createServer((req, res) => {
+  res.writeHead(200);
+  res.end('OK');
+}).listen(process.env.PORT || 3000);
+
 // ─── Démarrage ────────────────────────────────────────────────────────────────
 client.login(process.env.DISCORD_TOKEN);
