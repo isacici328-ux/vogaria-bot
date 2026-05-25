@@ -242,7 +242,7 @@ async function createTicketChannel(guild, member, type) {
     type: ChannelType.GuildText,
     parent: CATEGORIES[type],
     permissionOverwrites: [
-      { id: guild.roles.everyone, deny: [PermissionFlagsBits.ViewChannel] },
+      { id: guild.id, deny: [PermissionFlagsBits.ViewChannel] },
       { id: member.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.AttachFiles] },
       { id: ROLE_STAFF_ID, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.AttachFiles] },
       { id: client.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.EmbedLinks] },
@@ -450,6 +450,7 @@ client.once(Events.ClientReady, async () => {
 // ── Interactions ──────────────────────────────────────────────────────────────
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
+    if (!interaction.isButton()) return;
 
     // ── Ouvrir un ticket ──
     if (interaction.isButton() && interaction.customId.startsWith('open_')) {
