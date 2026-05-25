@@ -236,16 +236,20 @@ async function saveMessageToFirestore(channelId, msg) {
 async function createTicketChannel(guild, member, type) {
   const typeInfo    = TICKET_TYPES[type];
   const channelName = `${typeInfo.emoji}┃${member.user.username.toLowerCase().replace(/[^a-z0-9]/g, '-').slice(0, 22)}`;
-  const botId       = client.user?.id;
+
+  const staffRole = await guild.roles.fetch(ROLE_STAFF_ID);
 
   const overwrites = [
     { id: guild.id, deny: [PermissionFlagsBits.ViewChannel] },
     { id: member.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.AttachFiles] },
-    { id: ROLE_STAFF_ID, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.AttachFiles] },
   ];
 
-  if (botId) {
-    overwrites.push({ id: botId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.EmbedLinks] });
+  if (staffRole) {
+    overwrites.push({ id: staffRole.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.AttachFiles] });
+  }
+
+  if (client.user?.id) {
+    overwrites.push({ id: client.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.EmbedLinks] });
   }
 
   return await guild.channels.create({
@@ -255,7 +259,6 @@ async function createTicketChannel(guild, member, type) {
     permissionOverwrites: overwrites,
   });
 }
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // FORMULAIRE
 // ═══════════════════════════════════════════════════════════════════════════════
