@@ -800,6 +800,10 @@ client.on(Events.MessageCreate, async (msg) => {
   await msg.delete().catch(() => {});
 });
 
+// À mettre tout en bas du fichier, avant client.login()
+const http = require('http');
+http.createServer((req, res) => res.end('OK')).listen(process.env.PORT || 3000);
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // DÉMARRAGE
 // ═══════════════════════════════════════════════════════════════════════════════
