@@ -237,18 +237,25 @@ async function createTicketChannel(guild, member, type) {
   const typeInfo    = TICKET_TYPES[type];
   const channelName = `${typeInfo.emoji}┃${member.user.username.toLowerCase().replace(/[^a-z0-9]/g, '-').slice(0, 22)}`;
 
+  // String() explicite sur tous les IDs pour éviter les erreurs de cache Discord.js
+  const everyoneId = String(guild.id);
+  const memberId   = String(member.user.id);
+  const staffId    = String(ROLE_STAFF_ID);
+  const botId      = String(client.user.id);
+
   return await guild.channels.create({
     name: channelName,
     type: ChannelType.GuildText,
     parent: CATEGORIES[type],
     permissionOverwrites: [
-      { id: guild.id,      deny:  [PermissionFlagsBits.ViewChannel] },
-      { id: member.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.AttachFiles] },
-      { id: ROLE_STAFF_ID, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.AttachFiles] },
-      { id: client.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.EmbedLinks] },
+      { id: everyoneId, deny:  [PermissionFlagsBits.ViewChannel] },
+      { id: memberId,   allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.AttachFiles] },
+      { id: staffId,    allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.AttachFiles] },
+      { id: botId,      allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.EmbedLinks] },
     ],
   });
 }
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // FORMULAIRE
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -440,9 +447,9 @@ client.once(Events.ClientReady, async () => {
     const guild        = await client.guilds.fetch(GUILD_ID);
     const panelChannel = await guild.channels.fetch(PANEL_CHANNEL_ID);
     const messages     = await panelChannel.messages.fetch({ limit: 10 });
-    const botMessages  = messages.filter(m => m.author.id === client.user.id);
-    await Promise.all(botMessages.map(m => m.delete().catch(() => {})));
-    await postMainPanel(panelChannel);
+    const alreadyPosted = messages.some(m => m.author.id === client.user.id && m.embeds.length > 0);
+    if (!alreadyPosted) await postMainPanel(panelChannel);
+    else console.log('ℹ️  Panel déjà posté, pas de repost.');
   } catch (e) { console.error('Erreur init panel:', e.message); }
 });
 
