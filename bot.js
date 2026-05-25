@@ -440,11 +440,9 @@ client.once(Events.ClientReady, async () => {
     const guild        = await client.guilds.fetch(GUILD_ID);
     const panelChannel = await guild.channels.fetch(PANEL_CHANNEL_ID);
     const messages     = await panelChannel.messages.fetch({ limit: 10 });
-    const alreadyPosted = messages.some(m => m.author.id === client.user.id && m.embeds.length > 0);
-    // Supprimer les anciens messages du bot et reposter
-const botMessages = messages.filter(m => m.author.id === client.user.id);
-await Promise.all(botMessages.map(m => m.delete().catch(() => {})));
-await postMainPanel(panelChannel);
+    const botMessages  = messages.filter(m => m.author.id === client.user.id);
+    await Promise.all(botMessages.map(m => m.delete().catch(() => {})));
+    await postMainPanel(panelChannel);
   } catch (e) { console.error('Erreur init panel:', e.message); }
 });
 
